@@ -1,5 +1,22 @@
-const { WebcastPushConnection } = require('tiktok-live-connector');
 const { EventEmitter } = require('events');
+
+/**
+ * Resolve the WebcastPushConnection class across tiktok-live-connector versions:
+ *
+ * - v2.x: The class was removed from the main export (renamed to TikTokLiveConnection) and
+ *   now lives in the "tiktok-live-connector/legacy" subpath export. The legacy class keeps
+ *   emitting v1-style flattened event data (uniqueId, nickname, profilePictureUrl, comment,
+ *   giftName, diamondCount, ...) which this server and the frontend rely on.
+ * - v1.x: WebcastPushConnection is exported directly from the main package.
+ *
+ * This fixes the "WebcastPushConnection is not a constructor" error on fresh installs.
+ */
+let WebcastPushConnection;
+try {
+    ({ WebcastPushConnection } = require('tiktok-live-connector/legacy'));
+} catch (err) {
+    ({ WebcastPushConnection } = require('tiktok-live-connector'));
+}
 
 let globalConnectionCount = 0;
 
@@ -19,8 +36,42 @@ class TikTokConnectionWrapper extends EventEmitter {
         this.reconnectCount = 0;
         this.reconnectWaitMs = 1000;
         this.maxReconnectAttempts = 5;
+        this.connectedOnce = false;
+
+        // tiktok-live-connector v2 requires an options object (throws otherwise)
+        options = options || {};
+
+        // Map the legacy "sessionId" option to the v2 session bundle format (optional)
+        if (options.sessionId) {
+            options.session = { cookie: { sessionid: options.sessionId } };
+            delete options.sessionId;
+        }
 
         this.connection = new WebcastPushConnection(uniqueId, options);
+
+        // Compatibility normalization for tiktok-live-connector v2 legacy payloads:
+        // some v1-style field names differ in the underlying protobuf messages.
+        // These listeners mutate the message before any other listener receives it.
+        this.connection.on('chat', (msg) => {
+            if (msg.comment === undefined && typeof msg.content === 'string') {
+                msg.comment = msg.content;
+            }
+        });
+
+        this.connection.on('roomUser', (msg) => {
+            if (typeof msg.viewerCount !== 'number' && msg.total !== undefined) {
+                msg.viewerCount = parseInt(msg.total);
+            }
+        });
+
+        this.connection.on('like', (msg) => {
+            if (msg.likeCount === undefined && msg.count !== undefined) {
+                msg.likeCount = msg.count;
+            }
+            if (typeof msg.totalLikeCount !== 'number' && msg.total !== undefined) {
+                msg.totalLikeCount = parseInt(msg.total);
+            }
+        });
 
         this.connection.on('streamEnd', () => {
             this.log(`streamEnd event received, giving up connection`);
@@ -28,7 +79,9 @@ class TikTokConnectionWrapper extends EventEmitter {
         })
 
         this.connection.on('disconnected', ({ code, reason }) => {
-            globalConnectionCount -= 1;
+            if (this.connectedOnce) {
+                globalConnectionCount -= 1;
+            }
             this.log(`TikTok connection disconnected (code: ${code}, reason: ${reason})`);
             this.scheduleReconnect();
         });
@@ -43,7 +96,10 @@ class TikTokConnectionWrapper extends EventEmitter {
         this.connection.connect().then((state) => {
             this.log(`${isReconnect ? 'Reconnected' : 'Connected'} to roomId ${state.roomId}`);
 
-            globalConnectionCount += 1;
+            if (!this.connectedOnce) {
+                globalConnectionCount += 1;
+                this.connectedOnce = true;
+            }
 
             // Reset reconnect vars
             this.reconnectCount = 0;

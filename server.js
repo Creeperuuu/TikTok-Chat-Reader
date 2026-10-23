@@ -7,6 +7,7 @@ const {Server} = require('socket.io');
 const NodeCache = require('node-cache');
 const {TikTokConnectionWrapper, getGlobalConnectionCount} = require('./connectionWrapper');
 const {clientBlocked} = require('./limiter');
+const latestChatsApi = require('./latestChatsApi');
 const {SignConfig} = require('tiktok-live-connector');
 
 if (process.env.API_KEY) {
@@ -177,6 +178,13 @@ app.post('/generate-overlay-token', express.json(), async (req, res) => {
         return res.status(500).json({ error: 'Verification error' });
     }
 });
+
+// REST API: latest live chats as JSON
+//   GET /:username/latest-chats  (e.g. /cocothelarper/latest-chats)
+//   GET /api/:username/latest-chats (alias)
+//   GET /health
+app.use('/api', latestChatsApi);
+app.use(latestChatsApi);
 
 // Serve frontend files
 app.use(express.static('public'));
